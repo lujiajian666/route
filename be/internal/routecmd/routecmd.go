@@ -1,9 +1,7 @@
-// Package routecmd translates route table operations into platform commands.
+// Package routecmd 封装 macOS / Linux 的路由表命令与输出解析。
 //
-// macOS:  route -n get <host> / route add -host <host> <gateway> / route delete -host <host>
-// Linux:  ip route get <host> / ip route replace <host>/32 via <gateway> / ip route del <host>/32
-//
-// Every command is executed with an argv vector, never via a shell.
+// macOS: route -n get <host> / route add -host <host> <gateway> / route delete -host <host>
+// Linux: ip route get <host> / ip route replace <host>/32 via <gateway> / ip route del <host>/32
 package routecmd
 
 import (
@@ -18,7 +16,6 @@ import (
 	"be/internal/execx"
 )
 
-// Inspection is the raw kernel view of a destination.
 type Inspection struct {
 	Present   bool
 	HostRoute bool
@@ -28,7 +25,6 @@ type Inspection struct {
 	Detail    string
 }
 
-// TableEntry is one parsed line of `netstat -rn` (IPv4 section).
 type TableEntry struct {
 	Destination string `json:"destination"`
 	Gateway     string `json:"gateway"`
@@ -37,7 +33,6 @@ type TableEntry struct {
 	Line        string `json:"line"`
 }
 
-// Ops executes routing operations for the current platform.
 type Ops struct {
 	platform   string
 	runner     *execx.Runner
@@ -46,8 +41,6 @@ type Ops struct {
 	ipBin      string
 }
 
-// New detects the platform binaries. The runner is shared with the healer so a
-// single dry-run / sudo configuration applies everywhere.
 func New(runner *execx.Runner) *Ops {
 	return &Ops{
 		platform:   runtime.GOOS,
@@ -58,13 +51,8 @@ func New(runner *execx.Runner) *Ops {
 	}
 }
 
-// Platform returns the runtime OS name.
 func (o *Ops) Platform() string { return o.platform }
 
-// RouteBinary returns the resolved route binary path.
-func (o *Ops) RouteBinary() string { return o.routeBin }
-
-// Inspect reads the live state for host.
 func (o *Ops) Inspect(ctx context.Context, host string) (Inspection, error) {
 	if o.platform == "linux" {
 		return o.inspectLinux(ctx, host)
@@ -73,16 +61,16 @@ func (o *Ops) Inspect(ctx context.Context, host string) (Inspection, error) {
 }
 
 func (o *Ops) inspectDarwin(ctx context.Context, host string) (Inspection, error) {
-	res, err := o.runner.Read(ctx, o.routeBin, "-n", "get", host)
+	res, err := o.runner.Run(ctx, o.routeBin, "-n", "get", host)
 	if err != nil {
 		if isNotFound(res.Output) {
 			return Inspection{Present: false, Detail: res.Output}, nil
 		}
-		return Inspection{}, fmt.Errorf("route -n get %s 失败: %w", host, err)
+		return Inspection{}, err
 	}
 	gateway, iface, flags, ok := ParseDarwinGet(res.Output)
 	if !ok {
-		return Inspection{}, fmt.Errorf("无法解析 route -n get %s 的输出: %s", host, firstLine(res.Output))
+		return Inspection{}, fmt.Errorf("无法解析 route -n get %s 的输出", host)
 	}
 	return Inspection{
 		Present:   true,
@@ -95,19 +83,19 @@ func (o *Ops) inspectDarwin(ctx context.Context, host string) (Inspection, error
 }
 
 func (o *Ops) inspectLinux(ctx context.Context, host string) (Inspection, error) {
-	res, err := o.runner.Read(ctx, o.ipBin, "route", "get", host)
+	res, err := o.runner.Run(ctx, o.ipBin, "route", "get", host)
 	if err != nil {
 		if isNotFound(res.Output) {
 			return Inspection{Present: false, Detail: res.Output}, nil
 		}
-		return Inspection{}, fmt.Errorf("ip route get %s 失败: %w", host, err)
+		return Inspection{}, err
 	}
 	gateway, iface, ok := ParseLinuxGet(res.Output)
 	if !ok {
-		return Inspection{}, fmt.Errorf("无法解析 ip route get %s 的输出: %s", host, firstLine(res.Output))
+		return Inspection{}, fmt.Errorf("无法解析 ip route get %s 的输出", host)
 	}
 	hostRoute := false
-	if exact, exactErr := o.runner.Read(ctx, o.ipBin, "route", "show", host+"/32"); exactErr == nil {
+	if exact, err := o.runner.Run(ctx, o.ipBin, "route", "show", host+"/32"); err == nil {
 		hostRoute = hasExactHostRoute(exact.Output, host)
 	}
 	flags := []string{}
@@ -127,64 +115,35 @@ func (o *Ops) inspectLinux(ctx context.Context, host string) (Inspection, error)
 	}, nil
 }
 
-// AddHost installs a host route through gateway.
-func (o *Ops) AddHost(ctx context.Context, host, gateway string) (execx.Result, error) {
+func (o *Ops) AddHost(ctx context.Context, host, gateway string) error {
+	var err error
 	if o.platform == "linux" {
-		return o.runner.Privileged(ctx, o.ipBin, "route", "replace", host+"/32", "via", gateway)
+		_, err = o.runner.Run(ctx, o.ipBin, "route", "replace", host+"/32", "via", gateway)
+	} else {
+		_, err = o.runner.Run(ctx, o.routeBin, "add", "-host", host, gateway)
 	}
-	return o.runner.Privileged(ctx, o.routeBin, "add", "-host", host, gateway)
+	return err
 }
 
-// DeleteHost removes the host route.
-func (o *Ops) DeleteHost(ctx context.Context, host string) (execx.Result, error) {
+func (o *Ops) DeleteHost(ctx context.Context, host string) error {
+	var err error
 	if o.platform == "linux" {
-		return o.runner.Privileged(ctx, o.ipBin, "route", "del", host+"/32")
+		_, err = o.runner.Run(ctx, o.ipBin, "route", "del", host+"/32")
+	} else {
+		_, err = o.runner.Run(ctx, o.routeBin, "delete", "-host", host)
 	}
-	return o.runner.Privileged(ctx, o.routeBin, "delete", "-host", host)
+	return err
 }
 
-// Table returns the raw IPv4 routing table and the command used to read it.
 func (o *Ops) Table(ctx context.Context) (raw, command string, err error) {
 	if o.platform == "linux" && o.netstatBin == "" {
-		res, err := o.runner.Read(ctx, o.ipBin, "route", "show")
+		res, err := o.runner.Run(ctx, o.ipBin, "route", "show")
 		return res.Output, res.Command, err
 	}
-	res, err := o.runner.Read(ctx, o.netstatBin, "-rn")
+	res, err := o.runner.Run(ctx, o.netstatBin, "-rn")
 	return res.Output, res.Command, err
 }
 
-// ProbeSudo verifies that privileged commands can run without a password prompt.
-func (o *Ops) ProbeSudo(ctx context.Context) (bool, string) {
-	if o.platform == "linux" {
-		return o.runner.SudoProbe(ctx, o.ipBin, "route", "get", "127.0.0.1")
-	}
-	return o.runner.SudoProbe(ctx, o.routeBin, "-n", "get", "127.0.0.1")
-}
-
-// CommandPreviews returns the exact commands used for each operation.
-func (o *Ops) CommandPreviews(host, gateway string) map[string]string {
-	if host == "" {
-		host = "<host>"
-	}
-	if gateway == "" {
-		gateway = "<gateway>"
-	}
-	preview := map[string]string{
-		"get":   o.runner.CommandString(false, o.routeBin, "-n", "get", host),
-		"table": o.runner.CommandString(false, o.netstatBin, "-rn"),
-	}
-	if o.platform == "linux" {
-		preview["get"] = o.runner.CommandString(false, o.ipBin, "route", "get", host)
-		preview["add"] = o.runner.CommandString(true, o.ipBin, "route", "replace", host+"/32", "via", gateway)
-		preview["delete"] = o.runner.CommandString(true, o.ipBin, "route", "del", host+"/32")
-	} else {
-		preview["add"] = o.runner.CommandString(true, o.routeBin, "add", "-host", host, gateway)
-		preview["delete"] = o.runner.CommandString(true, o.routeBin, "delete", "-host", host)
-	}
-	return preview
-}
-
-// ParseDarwinGet parses `route -n get <host>` output.
 func ParseDarwinGet(out string) (gateway, iface string, flags []string, ok bool) {
 	scanner := bufio.NewScanner(strings.NewReader(out))
 	for scanner.Scan() {
@@ -208,7 +167,6 @@ func ParseDarwinGet(out string) (gateway, iface string, flags []string, ok bool)
 	return gateway, iface, flags, len(flags) > 0
 }
 
-// ParseLinuxGet parses `ip route get <host>` output.
 func ParseLinuxGet(out string) (gateway, iface string, ok bool) {
 	fields := strings.Fields(out)
 	if len(fields) == 0 {
@@ -229,10 +187,10 @@ func ParseLinuxGet(out string) (gateway, iface string, ok bool) {
 	return gateway, iface, true
 }
 
-// ParseNetstat parses the IPv4 section of `netstat -rn` (BSD and Linux layouts).
+// ParseNetstat 解析 netstat -rn 的 IPv4 部分（兼容 BSD 与 Linux 列布局）。
 func ParseNetstat(raw string) []TableEntry {
 	entries := make([]TableEntry, 0, 32)
-	inV4 := !strings.Contains(raw, "Internet:") // no section markers => parse all
+	inV4 := !strings.Contains(raw, "Internet:")
 	var header []string
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	for scanner.Scan() {
@@ -276,7 +234,6 @@ func ParseNetstat(raw string) []TableEntry {
 	return entries
 }
 
-// ParseIPRoute parses `ip route show` output (used when netstat is unavailable).
 func ParseIPRoute(raw string) []TableEntry {
 	entries := make([]TableEntry, 0, 32)
 	scanner := bufio.NewScanner(strings.NewReader(raw))
@@ -345,8 +302,7 @@ func hasExactHostRoute(out, host string) bool {
 		if len(fields) == 0 {
 			continue
 		}
-		destination := strings.TrimSuffix(fields[0], "/32")
-		if destination == host {
+		if strings.TrimSuffix(fields[0], "/32") == host {
 			return true
 		}
 	}
@@ -366,15 +322,6 @@ func isNotFound(output string) bool {
 		}
 	}
 	return false
-}
-
-func firstLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			return line
-		}
-	}
-	return ""
 }
 
 func findBin(name string, candidates ...string) string {

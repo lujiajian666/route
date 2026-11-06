@@ -2,7 +2,6 @@ package model
 
 import "time"
 
-// Route status values returned by the API.
 const (
 	StatusOK              = "ok"
 	StatusMissing         = "missing"
@@ -10,70 +9,33 @@ const (
 	StatusError           = "error"
 )
 
-// Settings is the persisted daemon configuration.
-type Settings struct {
-	AutoHeal        bool `json:"autoHeal"`
-	IntervalSeconds int  `json:"intervalSeconds"`
-}
-
-// Normalized clamps settings into the supported range.
-func (s Settings) Normalized() Settings {
-	if s.IntervalSeconds < 1 {
-		s.IntervalSeconds = 5
-	}
-	if s.IntervalSeconds > 3600 {
-		s.IntervalSeconds = 3600
-	}
-	return s
-}
-
-// Route is a desired host route: host goes through gateway.
+// Route 是托管的路由：目标地址走指定网关。
 type Route struct {
 	Host      string    `json:"host"`
 	Gateway   string    `json:"gateway"`
 	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// RouteState is the live kernel state of a desired route.
-type RouteState struct {
-	Status    string    `json:"status"`
-	Present   bool      `json:"present"`
-	HostRoute bool      `json:"hostRoute"`
-	Gateway   string    `json:"gateway,omitempty"`
-	Interface string    `json:"interface,omitempty"`
-	Flags     []string  `json:"flags"`
-	CheckedAt time.Time `json:"checkedAt"`
-	Message   string    `json:"message"`
-}
-
-// RouteView is what the UI renders for one managed route.
+// RouteView 是返回给前端的一条路由及其当前内核状态。
 type RouteView struct {
-	Host          string     `json:"host"`
-	Gateway       string     `json:"gateway"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
-	State         RouteState `json:"state"`
-	LastAppliedAt *time.Time `json:"lastAppliedAt,omitempty"`
-	LastError     string     `json:"lastError,omitempty"`
+	Host           string    `json:"host"`
+	Gateway        string    `json:"gateway"`
+	CreatedAt      time.Time `json:"createdAt"`
+	Status         string    `json:"status"`
+	Present        bool      `json:"present"`
+	HostRoute      bool      `json:"hostRoute"`
+	CurrentGateway string    `json:"currentGateway,omitempty"`
+	Interface      string    `json:"interface,omitempty"`
+	Flags          []string  `json:"flags"`
+	Message        string    `json:"message"`
+	CheckedAt      time.Time `json:"checkedAt"`
 }
 
-// Summary aggregates route states.
+// Summary 汇总所有托管路由的状态。
 type Summary struct {
 	Total           int `json:"total"`
 	OK              int `json:"ok"`
 	Missing         int `json:"missing"`
 	GatewayMismatch int `json:"gatewayMismatch"`
 	Error           int `json:"error"`
-}
-
-// Event is a single audit/log entry.
-type Event struct {
-	ID      int64     `json:"id"`
-	At      time.Time `json:"at"`
-	Level   string    `json:"level"` // info | success | warn | error
-	Action  string    `json:"action"`
-	Host    string    `json:"host,omitempty"`
-	Message string    `json:"message"`
-	Command string    `json:"command,omitempty"`
 }

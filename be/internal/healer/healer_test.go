@@ -8,7 +8,7 @@ import (
 	"be/internal/routecmd"
 )
 
-func TestEvaluate(t *testing.T) {
+func TestBuildView(t *testing.T) {
 	route := model.Route{Host: "5.5.2.13", Gateway: "192.168.100.254"}
 
 	tests := []struct {
@@ -18,24 +18,24 @@ func TestEvaluate(t *testing.T) {
 		status string
 	}{
 		{
-			name:   "ready host route",
+			name:   "ready",
 			insp:   routecmd.Inspection{Present: true, HostRoute: true, Gateway: "192.168.100.254"},
 			status: model.StatusOK,
 		},
 		{
-			name:   "missing route",
+			name:   "missing",
 			insp:   routecmd.Inspection{Present: false},
+			status: model.StatusMissing,
+		},
+		{
+			name:   "fallback route",
+			insp:   routecmd.Inspection{Present: true, HostRoute: false, Gateway: "192.168.100.1"},
 			status: model.StatusMissing,
 		},
 		{
 			name:   "wrong gateway",
 			insp:   routecmd.Inspection{Present: true, HostRoute: true, Gateway: "192.168.100.1"},
 			status: model.StatusGatewayMismatch,
-		},
-		{
-			name:   "default route fallback",
-			insp:   routecmd.Inspection{Present: true, HostRoute: false, Gateway: "192.168.100.1"},
-			status: model.StatusMissing,
 		},
 		{
 			name:   "inspect error",
@@ -46,15 +46,12 @@ func TestEvaluate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			state := evaluate(route, tc.insp, tc.err, time.Now())
-			if state.Status != tc.status {
-				t.Fatalf("expected %s, got %s (%s)", tc.status, state.Status, state.Message)
+			view := buildView(route, tc.insp, tc.err, time.Now())
+			if view.Status != tc.status {
+				t.Fatalf("expected %s, got %s (%s)", tc.status, view.Status, view.Message)
 			}
-			if state.CheckedAt.IsZero() {
-				t.Fatal("CheckedAt should be set")
-			}
-			if state.Flags == nil {
-				t.Fatal("Flags should never be nil (JSON should be [] not null)")
+			if view.Flags == nil {
+				t.Fatal("flags 不能是 nil")
 			}
 		})
 	}
@@ -62,24 +59,15 @@ func TestEvaluate(t *testing.T) {
 
 func TestSummarize(t *testing.T) {
 	views := []model.RouteView{
-		{State: model.RouteState{Status: model.StatusOK}},
-		{State: model.RouteState{Status: model.StatusMissing}},
-		{State: model.RouteState{Status: model.StatusMissing}},
-		{State: model.RouteState{Status: model.StatusGatewayMismatch}},
-		{State: model.RouteState{Status: model.StatusError}},
+		{Status: model.StatusOK},
+		{Status: model.StatusOK},
+		{Status: model.StatusMissing},
+		{Status: model.StatusGatewayMismatch},
+		{Status: model.StatusError},
 	}
 	s := summarize(views)
-	if s.Total != 5 || s.OK != 1 || s.Missing != 2 || s.GatewayMismatch != 1 || s.Error != 1 {
+	if s.Total != 5 || s.OK != 2 || s.Missing != 1 || s.GatewayMismatch != 1 || s.Error != 1 {
 		t.Fatalf("unexpected summary: %+v", s)
-	}
-}
-
-func TestFriendlyApplyError(t *testing.T) {
-	if got := friendlyApplyError(errString("sudo: a password is required")); got == "sudo: a password is required" {
-		t.Fatal("expected an actionable hint for sudo password errors")
-	}
-	if got := friendlyApplyError(errString("route: operation not permitted")); got == "route: operation not permitted" {
-		t.Fatal("expected an actionable hint for permission errors")
 	}
 }
 

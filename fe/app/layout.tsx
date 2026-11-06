@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "静态路由守护台 | RouteKeeper",
-  description: "托管主机路由，自动巡检修复，并通过 route -n get 核验网关走向。",
+  title: "静态路由管理 | RouteKeeper",
+  description: "添加、删除、巡检主机路由，并通过 route -n get 核验网关。",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

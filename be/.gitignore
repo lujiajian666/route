@@ -1,5 +1,4 @@
 /data/
-/bin/
 /route-daemon
 /route-daemon-*
 *.log
