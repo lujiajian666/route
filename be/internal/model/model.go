@@ -11,16 +11,14 @@ const (
 
 // Route 是托管的路由：目标地址走指定网关。
 type Route struct {
-	Host      string    `json:"host"`
-	Gateway   string    `json:"gateway"`
-	CreatedAt time.Time `json:"createdAt"`
+	Host    string `json:"host"`
+	Gateway string `json:"gateway"`
 }
 
 // RouteView 是返回给前端的一条路由及其当前内核状态。
 type RouteView struct {
 	Host           string    `json:"host"`
 	Gateway        string    `json:"gateway"`
-	CreatedAt      time.Time `json:"createdAt"`
 	Status         string    `json:"status"`
 	Present        bool      `json:"present"`
 	HostRoute      bool      `json:"hostRoute"`

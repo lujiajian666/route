@@ -3,7 +3,6 @@ export type RouteStatus = "ok" | "missing" | "gateway_mismatch" | "error";
 export type RouteView = {
   host: string;
   gateway: string;
-  createdAt: string;
   status: RouteStatus;
   present: boolean;
   hostRoute: boolean;

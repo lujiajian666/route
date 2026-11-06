@@ -158,7 +158,6 @@ func buildView(route model.Route, insp routecmd.Inspection, inspectErr error, at
 	view := model.RouteView{
 		Host:           route.Host,
 		Gateway:        route.Gateway,
-		CreatedAt:      route.CreatedAt,
 		Present:        insp.Present,
 		HostRoute:      insp.HostRoute,
 		CurrentGateway: insp.Gateway,

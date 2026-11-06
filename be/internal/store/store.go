@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"time"
 
 	"be/internal/model"
 	"be/internal/validate"
@@ -47,9 +46,6 @@ func New(path string) (*Store, error) {
 			continue
 		}
 		r.Host, r.Gateway = host, gateway
-		if r.CreatedAt.IsZero() {
-			r.CreatedAt = time.Now()
-		}
 		s.routes[r.Host] = r
 	}
 	return s, nil
@@ -78,10 +74,7 @@ func (s *Store) Upsert(host, gateway string) (model.Route, bool, error) {
 	defer s.mu.Unlock()
 
 	existing, exists := s.routes[host]
-	route := model.Route{Host: host, Gateway: gateway, CreatedAt: time.Now()}
-	if exists {
-		route.CreatedAt = existing.CreatedAt
-	}
+	route := model.Route{Host: host, Gateway: gateway}
 	s.routes[host] = route
 	if err := s.persistLocked(); err != nil {
 		if exists {
