@@ -1,0 +1,393 @@
+// Package routecmd translates route table operations into platform commands.
+//
+// macOS:  route -n get <host> / route add -host <host> <gateway> / route delete -host <host>
+// Linux:  ip route get <host> / ip route replace <host>/32 via <gateway> / ip route del <host>/32
+//
+// Every command is executed with an argv vector, never via a shell.
+package routecmd
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+
+	"be/internal/execx"
+)
+
+// Inspection is the raw kernel view of a destination.
+type Inspection struct {
+	Present   bool
+	HostRoute bool
+	Gateway   string
+	Interface string
+	Flags     []string
+	Detail    string
+}
+
+// TableEntry is one parsed line of `netstat -rn` (IPv4 section).
+type TableEntry struct {
+	Destination string `json:"destination"`
+	Gateway     string `json:"gateway"`
+	Flags       string `json:"flags"`
+	Netif       string `json:"netif"`
+	Line        string `json:"line"`
+}
+
+// Ops executes routing operations for the current platform.
+type Ops struct {
+	platform   string
+	runner     *execx.Runner
+	routeBin   string
+	netstatBin string
+	ipBin      string
+}
+
+// New detects the platform binaries. The runner is shared with the healer so a
+// single dry-run / sudo configuration applies everywhere.
+func New(runner *execx.Runner) *Ops {
+	return &Ops{
+		platform:   runtime.GOOS,
+		runner:     runner,
+		routeBin:   findBin("route", "/sbin/route", "/usr/sbin/route", "/usr/bin/route"),
+		netstatBin: findBin("netstat", "/usr/sbin/netstat", "/sbin/netstat", "/usr/bin/netstat", "/bin/netstat"),
+		ipBin:      findBin("ip", "/sbin/ip", "/usr/sbin/ip", "/usr/bin/ip", "/bin/ip"),
+	}
+}
+
+// Platform returns the runtime OS name.
+func (o *Ops) Platform() string { return o.platform }
+
+// RouteBinary returns the resolved route binary path.
+func (o *Ops) RouteBinary() string { return o.routeBin }
+
+// Inspect reads the live state for host.
+func (o *Ops) Inspect(ctx context.Context, host string) (Inspection, error) {
+	if o.platform == "linux" {
+		return o.inspectLinux(ctx, host)
+	}
+	return o.inspectDarwin(ctx, host)
+}
+
+func (o *Ops) inspectDarwin(ctx context.Context, host string) (Inspection, error) {
+	res, err := o.runner.Read(ctx, o.routeBin, "-n", "get", host)
+	if err != nil {
+		if isNotFound(res.Output) {
+			return Inspection{Present: false, Detail: res.Output}, nil
+		}
+		return Inspection{}, fmt.Errorf("route -n get %s 失败: %w", host, err)
+	}
+	gateway, iface, flags, ok := ParseDarwinGet(res.Output)
+	if !ok {
+		return Inspection{}, fmt.Errorf("无法解析 route -n get %s 的输出: %s", host, firstLine(res.Output))
+	}
+	return Inspection{
+		Present:   true,
+		HostRoute: hasFlag(flags, "HOST"),
+		Gateway:   gateway,
+		Interface: iface,
+		Flags:     flags,
+		Detail:    res.Output,
+	}, nil
+}
+
+func (o *Ops) inspectLinux(ctx context.Context, host string) (Inspection, error) {
+	res, err := o.runner.Read(ctx, o.ipBin, "route", "get", host)
+	if err != nil {
+		if isNotFound(res.Output) {
+			return Inspection{Present: false, Detail: res.Output}, nil
+		}
+		return Inspection{}, fmt.Errorf("ip route get %s 失败: %w", host, err)
+	}
+	gateway, iface, ok := ParseLinuxGet(res.Output)
+	if !ok {
+		return Inspection{}, fmt.Errorf("无法解析 ip route get %s 的输出: %s", host, firstLine(res.Output))
+	}
+	hostRoute := false
+	if exact, exactErr := o.runner.Read(ctx, o.ipBin, "route", "show", host+"/32"); exactErr == nil {
+		hostRoute = hasExactHostRoute(exact.Output, host)
+	}
+	flags := []string{}
+	if hostRoute {
+		flags = append(flags, "HOST")
+	}
+	if gateway != "" {
+		flags = append(flags, "GATEWAY")
+	}
+	return Inspection{
+		Present:   true,
+		HostRoute: hostRoute,
+		Gateway:   gateway,
+		Interface: iface,
+		Flags:     flags,
+		Detail:    res.Output,
+	}, nil
+}
+
+// AddHost installs a host route through gateway.
+func (o *Ops) AddHost(ctx context.Context, host, gateway string) (execx.Result, error) {
+	if o.platform == "linux" {
+		return o.runner.Privileged(ctx, o.ipBin, "route", "replace", host+"/32", "via", gateway)
+	}
+	return o.runner.Privileged(ctx, o.routeBin, "add", "-host", host, gateway)
+}
+
+// DeleteHost removes the host route.
+func (o *Ops) DeleteHost(ctx context.Context, host string) (execx.Result, error) {
+	if o.platform == "linux" {
+		return o.runner.Privileged(ctx, o.ipBin, "route", "del", host+"/32")
+	}
+	return o.runner.Privileged(ctx, o.routeBin, "delete", "-host", host)
+}
+
+// Table returns the raw IPv4 routing table and the command used to read it.
+func (o *Ops) Table(ctx context.Context) (raw, command string, err error) {
+	if o.platform == "linux" && o.netstatBin == "" {
+		res, err := o.runner.Read(ctx, o.ipBin, "route", "show")
+		return res.Output, res.Command, err
+	}
+	res, err := o.runner.Read(ctx, o.netstatBin, "-rn")
+	return res.Output, res.Command, err
+}
+
+// ProbeSudo verifies that privileged commands can run without a password prompt.
+func (o *Ops) ProbeSudo(ctx context.Context) (bool, string) {
+	if o.platform == "linux" {
+		return o.runner.SudoProbe(ctx, o.ipBin, "route", "get", "127.0.0.1")
+	}
+	return o.runner.SudoProbe(ctx, o.routeBin, "-n", "get", "127.0.0.1")
+}
+
+// CommandPreviews returns the exact commands used for each operation.
+func (o *Ops) CommandPreviews(host, gateway string) map[string]string {
+	if host == "" {
+		host = "<host>"
+	}
+	if gateway == "" {
+		gateway = "<gateway>"
+	}
+	preview := map[string]string{
+		"get":   o.runner.CommandString(false, o.routeBin, "-n", "get", host),
+		"table": o.runner.CommandString(false, o.netstatBin, "-rn"),
+	}
+	if o.platform == "linux" {
+		preview["get"] = o.runner.CommandString(false, o.ipBin, "route", "get", host)
+		preview["add"] = o.runner.CommandString(true, o.ipBin, "route", "replace", host+"/32", "via", gateway)
+		preview["delete"] = o.runner.CommandString(true, o.ipBin, "route", "del", host+"/32")
+	} else {
+		preview["add"] = o.runner.CommandString(true, o.routeBin, "add", "-host", host, gateway)
+		preview["delete"] = o.runner.CommandString(true, o.routeBin, "delete", "-host", host)
+	}
+	return preview
+}
+
+// ParseDarwinGet parses `route -n get <host>` output.
+func ParseDarwinGet(out string) (gateway, iface string, flags []string, ok bool) {
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "gateway":
+			gateway = strings.TrimSpace(value)
+		case "interface":
+			iface = strings.TrimSpace(value)
+		case "flags":
+			flags = parseFlags(value)
+		}
+	}
+	return gateway, iface, flags, len(flags) > 0
+}
+
+// ParseLinuxGet parses `ip route get <host>` output.
+func ParseLinuxGet(out string) (gateway, iface string, ok bool) {
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", "", false
+	}
+	for i, field := range fields {
+		switch field {
+		case "via":
+			if i+1 < len(fields) {
+				gateway = fields[i+1]
+			}
+		case "dev":
+			if i+1 < len(fields) {
+				iface = fields[i+1]
+			}
+		}
+	}
+	return gateway, iface, true
+}
+
+// ParseNetstat parses the IPv4 section of `netstat -rn` (BSD and Linux layouts).
+func ParseNetstat(raw string) []TableEntry {
+	entries := make([]TableEntry, 0, 32)
+	inV4 := !strings.Contains(raw, "Internet:") // no section markers => parse all
+	var header []string
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case line == "":
+			continue
+		case strings.HasPrefix(line, "Routing tables"), strings.HasPrefix(line, "Kernel IP routing table"):
+			continue
+		case line == "Internet:":
+			inV4 = true
+			header = nil
+			continue
+		case strings.HasPrefix(line, "Internet6:"):
+			inV4 = false
+			header = nil
+			continue
+		case strings.HasPrefix(line, "Destination"):
+			header = strings.Fields(line)
+			continue
+		}
+		if !inV4 {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || strings.Contains(fields[0], ":") {
+			continue
+		}
+		entry := TableEntry{
+			Destination: fields[0],
+			Gateway:     fieldByHeader(header, fields, "Gateway", 1),
+			Flags:       fieldByHeader(header, fields, "Flags", 2),
+			Netif:       fieldByHeader(header, fields, "Iface", 3),
+			Line:        line,
+		}
+		if entry.Netif == "" {
+			entry.Netif = fieldByHeader(header, fields, "Netif", 3)
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// ParseIPRoute parses `ip route show` output (used when netstat is unavailable).
+func ParseIPRoute(raw string) []TableEntry {
+	entries := make([]TableEntry, 0, 32)
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		entry := TableEntry{Destination: fields[0], Line: line}
+		for i, f := range fields {
+			switch f {
+			case "via":
+				if i+1 < len(fields) {
+					entry.Gateway = fields[i+1]
+					entry.Flags = "UG"
+				}
+			case "dev":
+				if i+1 < len(fields) {
+					entry.Netif = fields[i+1]
+				}
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func fieldByHeader(header, fields []string, name string, fallback int) string {
+	for i, h := range header {
+		if strings.EqualFold(h, name) && i < len(fields) {
+			return fields[i]
+		}
+	}
+	if fallback < len(fields) {
+		return fields[fallback]
+	}
+	return ""
+}
+
+func parseFlags(value string) []string {
+	value = strings.Trim(strings.TrimSpace(value), "<>")
+	parts := strings.Split(value, ",")
+	flags := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			flags = append(flags, p)
+		}
+	}
+	return flags
+}
+
+func hasFlag(flags []string, want string) bool {
+	for _, f := range flags {
+		if strings.EqualFold(f, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasExactHostRoute(out, host string) bool {
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		destination := strings.TrimSuffix(fields[0], "/32")
+		if destination == host {
+			return true
+		}
+	}
+	return false
+}
+
+func isNotFound(output string) bool {
+	lower := strings.ToLower(output)
+	for _, marker := range []string{
+		"not in table",
+		"no such process",
+		"network is unreachable",
+		"cannot assign requested address",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+func findBin(name string, candidates ...string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return name
+}

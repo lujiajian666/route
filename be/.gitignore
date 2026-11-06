@@ -1,0 +1,6 @@
+/data/
+/bin/
+/route-daemon
+/route-daemon-*
+*.log
+.DS_Store
