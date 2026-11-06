@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"be/internal/execx"
 	"be/internal/model"
 	"be/internal/routecmd"
 	"be/internal/store"
@@ -20,13 +21,22 @@ type Healer struct {
 	opMu     sync.Mutex
 }
 
-func (h *Healer) Ops() *routecmd.Ops { return h.ops }
-
-func New(st *store.Store, ops *routecmd.Ops, interval time.Duration) *Healer {
+func New(st *store.Store, interval time.Duration) *Healer {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	return &Healer{store: st, ops: ops, interval: interval}
+	runner := &execx.Runner{Timeout: 10 * time.Second}
+	return &Healer{store: st, ops: routecmd.New(runner), interval: interval}
+}
+
+// RouteTable 返回当前内核路由表，供页面展示。
+func (h *Healer) RouteTable(ctx context.Context) (raw, command string, err error) {
+	return h.ops.Table(ctx)
+}
+
+// Routes 返回托管路由列表（只读，不执行任何系统命令）。
+func (h *Healer) Routes() []model.Route {
+	return h.store.Routes()
 }
 
 // View 读取一条路由的实时状态，不做任何修改。
@@ -53,16 +63,6 @@ func (h *Healer) Add(ctx context.Context, host, gateway string) (model.RouteView
 	}
 	view, _, applyErr := h.reconcileOne(ctx, route)
 	return view, created, applyErr
-}
-
-// Apply 立即修复一条已托管的路由。
-func (h *Healer) Apply(ctx context.Context, host string) (model.RouteView, error) {
-	route, ok := h.store.Get(host)
-	if !ok {
-		return model.RouteView{}, store.ErrNotFound
-	}
-	view, _, err := h.reconcileOne(ctx, route)
-	return view, err
 }
 
 // Delete 删除内核主机路由并停止托管。

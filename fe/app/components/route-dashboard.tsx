@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 
 import {
   addRoute,
-  applyRoute,
   deleteRoute,
   errorMessage,
   fetchRouteTable,
@@ -98,19 +97,6 @@ export default function RouteDashboard() {
       setNotice({ kind: "ok", text: `已${result.created ? "添加" : "更新"} ${target} → ${nextHop}` });
       setHost("");
       setGateway("");
-    } catch (error) {
-      setNotice({ kind: "err", text: errorMessage(error) });
-    } finally {
-      setBusy(null);
-      await load();
-    }
-  }
-
-  async function handleApply(route: RouteView) {
-    setBusy(route.host);
-    try {
-      await applyRoute(route.host);
-      setNotice({ kind: "ok", text: `${route.host} 已重建并核验` });
     } catch (error) {
       setNotice({ kind: "err", text: errorMessage(error) });
     } finally {
@@ -252,7 +238,6 @@ export default function RouteDashboard() {
                 <tbody className="divide-y divide-white/[0.06]">
                   {data?.routes.map((route) => {
                     const status = STATUS[route.status] ?? STATUS.error;
-                    const working = busy === route.host;
                     return (
                       <tr key={route.host}>
                         <td className="px-5 py-4 font-mono text-white">{route.host}</td>
@@ -274,15 +259,7 @@ export default function RouteDashboard() {
                           </p>
                         </td>
                         <td className="px-5 py-4">
-                          <div className="flex justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => void handleApply(route)}
-                              disabled={busy !== null}
-                              className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/[0.07] disabled:opacity-40"
-                            >
-                              {working ? "处理中…" : "修复"}
-                            </button>
+                          <div className="flex justify-end">
                             <button
                               type="button"
                               onClick={() => void handleDelete(route)}

@@ -39,9 +39,6 @@ func New(h *healer.Healer) *gin.Engine {
 		api.DELETE("/routes/:host", func(c *gin.Context) {
 			deleteRoute(c, h)
 		})
-		api.POST("/routes/:host/apply", func(c *gin.Context) {
-			applyRoute(c, h)
-		})
 		api.GET("/route-table", func(c *gin.Context) {
 			routeTable(c, h)
 		})
@@ -93,37 +90,19 @@ func deleteRoute(c *gin.Context, h *healer.Healer) {
 	c.JSON(http.StatusOK, gin.H{"removed": true})
 }
 
-func applyRoute(c *gin.Context, h *healer.Healer) {
-	host, err := validate.IPv4(c.Param("host"))
-	if err != nil {
-		fail(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	view, err := h.Apply(c.Request.Context(), host)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			fail(c, http.StatusNotFound, host+" 不在托管列表中")
-			return
-		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "route": view})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"route": view})
-}
-
 type tableEntry struct {
 	routecmd.TableEntry
 	Managed bool `json:"managed"`
 }
 
 func routeTable(c *gin.Context, h *healer.Healer) {
-	views, _, _ := h.CheckAll(c.Request.Context())
-	managed := make(map[string]bool, len(views))
-	for _, v := range views {
-		managed[v.Host] = true
+	routes := h.Routes()
+	managed := make(map[string]bool, len(routes))
+	for _, r := range routes {
+		managed[r.Host] = true
 	}
 
-	raw, command, err := h.Ops().Table(c.Request.Context())
+	raw, command, err := h.RouteTable(c.Request.Context())
 	entries := routecmd.ParseNetstat(raw)
 	if strings.Contains(command, " ip route ") {
 		entries = routecmd.ParseIPRoute(raw)

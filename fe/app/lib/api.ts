@@ -50,10 +50,6 @@ export type AddRouteResponse = {
   created: boolean;
 };
 
-export type ApplyRouteResponse = {
-  route: RouteView;
-};
-
 export class ApiError extends Error {
   status: number;
 
@@ -113,12 +109,6 @@ export function addRoute(host: string, gateway: string): Promise<AddRouteRespons
   return request<AddRouteResponse>("/routes", {
     method: "POST",
     body: JSON.stringify({ host, gateway }),
-  });
-}
-
-export function applyRoute(host: string): Promise<ApplyRouteResponse> {
-  return request<ApplyRouteResponse>(`/routes/${encodeURIComponent(host)}/apply`, {
-    method: "POST",
   });
 }
 

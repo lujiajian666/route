@@ -12,10 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"be/internal/execx"
 	"be/internal/healer"
 	"be/internal/httpapi"
-	"be/internal/routecmd"
 	"be/internal/store"
 )
 
@@ -34,9 +32,7 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	runner := &execx.Runner{Timeout: 10 * time.Second}
-	ops := routecmd.New(runner)
-	h := healer.New(st, ops, time.Duration(*interval)*time.Second)
+	h := healer.New(st, time.Duration(*interval)*time.Second)
 
 	log.Printf("route-daemon (%s/%s)", runtime.GOOS, runtime.GOARCH)
 	log.Printf("监听: http://%s", *listen)
