@@ -1,8 +1,9 @@
-// Package healer 负责巡检托管路由，发现丢失或网关错误时自动恢复。
+// Package healer 负责巡检托管路由，发现丢失或网关不对时自动恢复。
 package healer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -19,6 +20,9 @@ type Healer struct {
 	ops      *routecmd.Ops
 	interval time.Duration
 	opMu     sync.Mutex
+
+	errMu   sync.Mutex
+	lastErr map[string]string
 }
 
 func New(st *store.Store, interval time.Duration) *Healer {
@@ -26,7 +30,12 @@ func New(st *store.Store, interval time.Duration) *Healer {
 		interval = 5 * time.Second
 	}
 	runner := &execx.Runner{Timeout: 10 * time.Second}
-	return &Healer{store: st, ops: routecmd.New(runner), interval: interval}
+	return &Healer{
+		store:    st,
+		ops:      routecmd.New(runner),
+		interval: interval,
+		lastErr:  make(map[string]string),
+	}
 }
 
 // RouteTable 返回当前内核路由表，供页面展示。
@@ -39,18 +48,12 @@ func (h *Healer) Routes() []model.Route {
 	return h.store.Routes()
 }
 
-// View 读取一条路由的实时状态，不做任何修改。
-func (h *Healer) View(ctx context.Context, route model.Route) model.RouteView {
-	insp, err := h.ops.Inspect(ctx, route.Host)
-	return buildView(route, insp, err, time.Now())
-}
-
 // CheckAll 读取所有托管路由的实时状态。
 func (h *Healer) CheckAll(ctx context.Context) ([]model.RouteView, model.Summary, time.Time) {
 	routes := h.store.Routes()
 	views := make([]model.RouteView, 0, len(routes))
 	for _, r := range routes {
-		views = append(views, h.View(ctx, r))
+		views = append(views, h.view(ctx, r))
 	}
 	return views, summarize(views), time.Now()
 }
@@ -73,7 +76,6 @@ func (h *Healer) Delete(ctx context.Context, host string) error {
 	if _, ok := h.store.Get(host); !ok {
 		return store.ErrNotFound
 	}
-
 	insp, err := h.ops.Inspect(ctx, host)
 	if err != nil {
 		return err
@@ -105,17 +107,14 @@ func (h *Healer) Run(ctx context.Context) {
 func (h *Healer) reconcile(ctx context.Context) {
 	for _, route := range h.store.Routes() {
 		view, changed, err := h.reconcileOne(ctx, route)
-		if !changed {
-			if err != nil {
-				log.Printf("巡检失败 %s: %v", route.Host, err)
-			}
-			continue
-		}
 		if err != nil {
-			log.Printf("自动恢复失败 %s -> %s: %v", route.Host, route.Gateway, err)
+			h.logFailure(route, changed, err)
 			continue
 		}
-		log.Printf("已自动恢复路由 %s -> %s（%s）", route.Host, route.Gateway, view.Interface)
+		h.clearFailure(route.Host)
+		if changed {
+			log.Printf("已自动恢复路由 %s -> %s（%s）", route.Host, route.Gateway, view.Interface)
+		}
 	}
 }
 
@@ -124,8 +123,7 @@ func (h *Healer) reconcileOne(ctx context.Context, route model.Route) (model.Rou
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
 
-	insp, err := h.ops.Inspect(ctx, route.Host)
-	view := buildView(route, insp, err, time.Now())
+	view, insp, err := h.viewWithInspection(ctx, route)
 	if err != nil {
 		return view, false, err
 	}
@@ -138,20 +136,68 @@ func (h *Healer) reconcileOne(ctx context.Context, route model.Route) (model.Rou
 			return view, false, err
 		}
 	}
-
 	if err := h.ops.AddHost(ctx, route.Host, route.Gateway); err != nil {
 		return view, true, err
 	}
 
-	verified, verifyErr := h.ops.Inspect(ctx, route.Host)
-	verifiedView := buildView(route, verified, verifyErr, time.Now())
-	if verifyErr != nil {
-		return verifiedView, true, verifyErr
+	view, _, err = h.viewWithInspection(ctx, route)
+	if err != nil {
+		return view, true, err
 	}
-	if verifiedView.Status != model.StatusOK {
-		return verifiedView, true, fmt.Errorf("%s", verifiedView.Message)
+	if view.Status != model.StatusOK {
+		return view, true, errors.New(view.Message)
 	}
-	return verifiedView, true, nil
+	return view, true, nil
+}
+
+// view 读取路由状态，并用接口的 DHCP 网关做二次校验。
+func (h *Healer) view(ctx context.Context, route model.Route) model.RouteView {
+	view, _, _ := h.viewWithInspection(ctx, route)
+	return view
+}
+
+func (h *Healer) viewWithInspection(ctx context.Context, route model.Route) (model.RouteView, routecmd.Inspection, error) {
+	insp, err := h.ops.Inspect(ctx, route.Host)
+	view := buildView(route, insp, err, time.Now())
+	if err != nil {
+		return view, insp, err
+	}
+	if view.Status != model.StatusOK || insp.Interface == "" {
+		return view, insp, nil
+	}
+
+	gateway, ok, dhcpErr := h.ops.InterfaceGateway(ctx, insp.Interface)
+	if dhcpErr != nil || !ok {
+		// 静态地址或读取 DHCP 失败时，只按 route -n get 的结果判断。
+		return view, insp, nil
+	}
+	if gateway != route.Gateway {
+		view.Status = model.StatusGatewayMismatch
+		view.Message = fmt.Sprintf("接口 %s 的 DHCP 网关是 %s，期望 %s", insp.Interface, gateway, route.Gateway)
+	}
+	return view, insp, nil
+}
+
+func (h *Healer) logFailure(route model.Route, changed bool, err error) {
+	h.errMu.Lock()
+	defer h.errMu.Unlock()
+
+	msg := err.Error()
+	if h.lastErr[route.Host] == msg {
+		return
+	}
+	h.lastErr[route.Host] = msg
+	if changed {
+		log.Printf("自动恢复失败 %s -> %s: %v", route.Host, route.Gateway, err)
+		return
+	}
+	log.Printf("巡检跳过 %s: %v", route.Host, err)
+}
+
+func (h *Healer) clearFailure(host string) {
+	h.errMu.Lock()
+	delete(h.lastErr, host)
+	h.errMu.Unlock()
 }
 
 func buildView(route model.Route, insp routecmd.Inspection, inspectErr error, at time.Time) model.RouteView {

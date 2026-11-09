@@ -108,3 +108,17 @@ func TestHasExactHostRoute(t *testing.T) {
 		t.Fatal("network route must not count")
 	}
 }
+
+func TestParseIPConfigRouter(t *testing.T) {
+	out := `op = BOOTREPLY
+router (ip_mult): {192.168.100.254}
+subnet_mask (ip): 255.255.255.0
+`
+	gw, ok := parseIPConfigRouter(out)
+	if !ok || gw != "192.168.100.254" {
+		t.Fatalf("unexpected router: %q %v", gw, ok)
+	}
+	if _, ok := parseIPConfigRouter("no router here"); ok {
+		t.Fatal("expected no router")
+	}
+}

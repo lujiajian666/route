@@ -160,11 +160,10 @@ export default function RouteDashboard() {
 
         {notice ? (
           <p
-            className={`mt-5 rounded-lg border px-3 py-2 text-sm ${
-              notice.kind === "ok"
+            className={`mt-5 rounded-lg border px-3 py-2 text-sm ${notice.kind === "ok"
                 ? "border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-200"
                 : "border-rose-400/20 bg-rose-400/[0.06] text-rose-200"
-            }`}
+              }`}
           >
             {notice.text}
           </p>
@@ -254,7 +253,7 @@ export default function RouteDashboard() {
                             <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
                             {status.label}
                           </span>
-                          <p className="mt-1 max-w-[220px] truncate text-[11px] text-zinc-500" title={route.message}>
+                          <p className="mt-1 max-w-[220px] text-[11px] text-zinc-500" title={route.message}>
                             {route.message}
                           </p>
                         </td>

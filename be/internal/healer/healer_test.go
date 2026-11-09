@@ -19,7 +19,7 @@ func TestBuildView(t *testing.T) {
 	}{
 		{
 			name:   "ready",
-			insp:   routecmd.Inspection{Present: true, HostRoute: true, Gateway: "192.168.100.254"},
+			insp:   routecmd.Inspection{Present: true, HostRoute: true, Gateway: "192.168.100.254", Interface: "en7"},
 			status: model.StatusOK,
 		},
 		{
@@ -37,6 +37,7 @@ func TestBuildView(t *testing.T) {
 			insp:   routecmd.Inspection{Present: true, HostRoute: true, Gateway: "192.168.100.1"},
 			status: model.StatusGatewayMismatch,
 		},
+
 		{
 			name:   "inspect error",
 			insp:   routecmd.Inspection{},

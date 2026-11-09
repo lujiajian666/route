@@ -34,20 +34,22 @@ type TableEntry struct {
 }
 
 type Ops struct {
-	platform   string
-	runner     *execx.Runner
-	routeBin   string
-	netstatBin string
-	ipBin      string
+	platform    string
+	runner      *execx.Runner
+	routeBin    string
+	netstatBin  string
+	ipBin       string
+	ipconfigBin string
 }
 
 func New(runner *execx.Runner) *Ops {
 	return &Ops{
-		platform:   runtime.GOOS,
-		runner:     runner,
-		routeBin:   findBin("route", "/sbin/route", "/usr/sbin/route", "/usr/bin/route"),
-		netstatBin: findBin("netstat", "/usr/sbin/netstat", "/sbin/netstat", "/usr/bin/netstat", "/bin/netstat"),
-		ipBin:      findBin("ip", "/sbin/ip", "/usr/sbin/ip", "/usr/bin/ip", "/bin/ip"),
+		platform:    runtime.GOOS,
+		runner:      runner,
+		routeBin:    findBin("route", "/sbin/route", "/usr/sbin/route", "/usr/bin/route"),
+		netstatBin:  findBin("netstat", "/usr/sbin/netstat", "/sbin/netstat", "/usr/bin/netstat", "/bin/netstat"),
+		ipBin:       findBin("ip", "/sbin/ip", "/usr/sbin/ip", "/usr/bin/ip", "/bin/ip"),
+		ipconfigBin: findBin("ipconfig", "/usr/sbin/ipconfig", "/sbin/ipconfig"),
 	}
 }
 
@@ -115,6 +117,39 @@ func (o *Ops) inspectLinux(ctx context.Context, host string) (Inspection, error)
 	}, nil
 }
 
+// InterfaceGateway 读取接口通过 DHCP 拿到的网关，例如 en7 -> 192.168.100.254。
+func (o *Ops) InterfaceGateway(ctx context.Context, iface string) (string, bool, error) {
+	if o.platform != "darwin" || iface == "" {
+		return "", false, nil
+	}
+	res, err := o.runner.Run(ctx, o.ipconfigBin, "getpacket", iface)
+	if err != nil {
+		return "", false, err
+	}
+	gateway, ok := parseIPConfigRouter(res.Output)
+	return gateway, ok, nil
+}
+
+func parseIPConfigRouter(out string) (string, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "router (") {
+			continue
+		}
+		start := strings.Index(line, "{")
+		end := strings.LastIndex(line, "}")
+		if start < 0 || end <= start {
+			continue
+		}
+		gateway := strings.TrimSpace(line[start+1 : end])
+		if gateway != "" {
+			return gateway, true
+		}
+	}
+	return "", false
+}
+
+// AddHost 添加主机路由。接口由内核按路由表选择。
 func (o *Ops) AddHost(ctx context.Context, host, gateway string) error {
 	var err error
 	if o.platform == "linux" {
@@ -125,14 +160,24 @@ func (o *Ops) AddHost(ctx context.Context, host, gateway string) error {
 	return err
 }
 
+// DeleteHost 删除该目标的全部主机路由；重复路由会循环删除到 not in table。
 func (o *Ops) DeleteHost(ctx context.Context, host string) error {
-	var err error
-	if o.platform == "linux" {
-		_, err = o.runner.Run(ctx, o.ipBin, "route", "del", host+"/32")
-	} else {
-		_, err = o.runner.Run(ctx, o.routeBin, "delete", "-host", host)
+	for attempt := 0; attempt < 4; attempt++ {
+		var err error
+		if o.platform == "linux" {
+			_, err = o.runner.Run(ctx, o.ipBin, "route", "del", host+"/32")
+		} else {
+			_, err = o.runner.Run(ctx, o.routeBin, "delete", "-host", host)
+		}
+		if err == nil {
+			continue
+		}
+		if isNotFound(err.Error()) {
+			return nil
+		}
+		return err
 	}
-	return err
+	return nil
 }
 
 func (o *Ops) Table(ctx context.Context) (raw, command string, err error) {
