@@ -16,6 +16,7 @@ import {
 
 const REFRESH_MS = 5000;
 const IPV4_RE = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const TARGET_RE = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(\/([1-9]|[12]\d|3[0-2]))?$/;
 
 const STATUS: Record<RouteStatus, { label: string; dot: string; badge: string }> = {
   ok: { label: "正常", dot: "bg-emerald-400", badge: "border-emerald-400/30 bg-emerald-400/10 text-emerald-300" },
@@ -78,15 +79,15 @@ export default function RouteDashboard() {
     const target = host.trim();
     const nextHop = gateway.trim();
 
-    if (!IPV4_RE.test(target)) {
-      setFormError("目标地址必须是合法的 IPv4，例如 5.5.2.13");
+    if (!TARGET_RE.test(target)) {
+      setFormError("目标地址必须是 IPv4 或 CIDR，例如 5.5.2.13 或 5.5.2.0/24");
       return;
     }
     if (!IPV4_RE.test(nextHop)) {
       setFormError("网关必须是合法的 IPv4，例如 192.168.100.254");
       return;
     }
-    if (target === nextHop) {
+    if (!target.includes("/") && target === nextHop) {
       setFormError("网关不能与目标地址相同");
       return;
     }
@@ -207,7 +208,7 @@ export default function RouteDashboard() {
           </form>
           {formError ? <p className="mt-2 text-xs text-rose-300">{formError}</p> : null}
           <p className="mt-3 font-mono text-[11px] text-zinc-600">
-            route delete -host &lt;目标&gt; && route add -host &lt;目标&gt; &lt;网关&gt;
+            route add -host &lt;IP&gt; &lt;网关&gt; 或 route add -net &lt;CIDR&gt; &lt;网关&gt;
           </p>
         </section>
 
@@ -226,7 +227,7 @@ export default function RouteDashboard() {
               <table className="w-full min-w-[720px] text-left text-sm">
                 <thead className="text-xs text-zinc-500">
                   <tr className="border-b border-white/10">
-                    <th className="px-5 py-3 font-medium">目标地址</th>
+                    <th className="px-5 py-3 font-medium">目标地址 / 网段</th>
                     <th className="px-4 py-3 font-medium">网关</th>
                     <th className="px-4 py-3 font-medium">当前网关</th>
                     <th className="px-4 py-3 font-medium">接口</th>

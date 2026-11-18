@@ -58,6 +58,24 @@ func TestBuildView(t *testing.T) {
 	}
 }
 
+func TestBuildViewNetwork(t *testing.T) {
+	route := model.Route{Host: "5.5.2.0/24", Gateway: "192.168.100.254"}
+
+	ready := buildView(route, routecmd.Inspection{
+		Present: true, NetworkRoute: true, Gateway: "192.168.100.254", Interface: "en7",
+	}, nil, time.Now())
+	if ready.Status != model.StatusOK {
+		t.Fatalf("expected ok, got %s (%s)", ready.Status, ready.Message)
+	}
+
+	missing := buildView(route, routecmd.Inspection{
+		Present: true, Gateway: "192.168.100.1", Interface: "en0",
+	}, nil, time.Now())
+	if missing.Status != model.StatusMissing {
+		t.Fatalf("expected missing, got %s (%s)", missing.Status, missing.Message)
+	}
+}
+
 func TestSummarize(t *testing.T) {
 	views := []model.RouteView{
 		{Status: model.StatusOK},

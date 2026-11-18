@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,7 +81,7 @@ func (h *Healer) Delete(ctx context.Context, host string) error {
 	if err != nil {
 		return err
 	}
-	if insp.Present && insp.HostRoute {
+	if insp.Present && (insp.HostRoute || insp.NetworkRoute) {
 		if err := h.ops.DeleteHost(ctx, host); err != nil {
 			return err
 		}
@@ -131,7 +132,7 @@ func (h *Healer) reconcileOne(ctx context.Context, route model.Route) (model.Rou
 		return view, false, nil
 	}
 
-	if insp.Present && insp.HostRoute {
+	if insp.Present && (insp.HostRoute || insp.NetworkRoute) {
 		if err := h.ops.DeleteHost(ctx, route.Host); err != nil {
 			return view, false, err
 		}
@@ -215,14 +216,22 @@ func buildView(route model.Route, insp routecmd.Inspection, inspectErr error, at
 		view.Flags = []string{}
 	}
 
+	isNetwork := strings.Contains(route.Host, "/")
 	switch {
 	case inspectErr != nil:
 		view.Status = model.StatusError
 		view.Message = inspectErr.Error()
 	case !insp.Present:
 		view.Status = model.StatusMissing
-		view.Message = "路由表中未找到该主机路由"
-	case !insp.HostRoute:
+		view.Message = "路由表中未找到该路由"
+	case isNetwork && !insp.NetworkRoute:
+		view.Status = model.StatusMissing
+		if insp.Gateway != "" {
+			view.Message = fmt.Sprintf("未建立网段路由，当前由其它路由（网关 %s）转发", insp.Gateway)
+		} else {
+			view.Message = "未建立网段路由"
+		}
+	case !isNetwork && !insp.HostRoute:
 		view.Status = model.StatusMissing
 		if insp.Gateway != "" {
 			view.Message = fmt.Sprintf("未建立主机路由，当前由其它路由（网关 %s）转发", insp.Gateway)
@@ -234,7 +243,7 @@ func buildView(route model.Route, insp routecmd.Inspection, inspectErr error, at
 		view.Message = fmt.Sprintf("当前走网关 %s，期望 %s", insp.Gateway, route.Gateway)
 	default:
 		view.Status = model.StatusOK
-		view.Message = "主机路由已就绪"
+		view.Message = "路由已就绪"
 	}
 	return view
 }

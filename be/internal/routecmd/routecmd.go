@@ -6,8 +6,10 @@ package routecmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -17,12 +19,13 @@ import (
 )
 
 type Inspection struct {
-	Present   bool
-	HostRoute bool
-	Gateway   string
-	Interface string
-	Flags     []string
-	Detail    string
+	Present      bool
+	HostRoute    bool
+	NetworkRoute bool
+	Gateway      string
+	Interface    string
+	Flags        []string
+	Detail       string
 }
 
 type TableEntry struct {
@@ -62,30 +65,39 @@ func (o *Ops) Inspect(ctx context.Context, host string) (Inspection, error) {
 	return o.inspectDarwin(ctx, host)
 }
 
-func (o *Ops) inspectDarwin(ctx context.Context, host string) (Inspection, error) {
-	res, err := o.runner.Run(ctx, o.routeBin, "-n", "get", host)
+func (o *Ops) inspectDarwin(ctx context.Context, target string) (Inspection, error) {
+	query, isNetwork := networkQuery(target)
+	res, err := o.runner.Run(ctx, o.routeBin, "-n", "get", query)
 	if err != nil {
 		if isNotFound(res.Output) {
 			return Inspection{Present: false, Detail: res.Output}, nil
 		}
 		return Inspection{}, err
 	}
-	gateway, iface, flags, ok := ParseDarwinGet(res.Output)
+	destination, mask, gateway, iface, flags, ok := parseDarwinRoute(res.Output)
 	if !ok {
-		return Inspection{}, fmt.Errorf("无法解析 route -n get %s 的输出", host)
+		return Inspection{}, fmt.Errorf("无法解析 route -n get %s 的输出", target)
 	}
+
+	networkRoute := false
+	if isNetwork {
+		networkRoute = matchesNetwork(destination, mask, target)
+	}
+
 	return Inspection{
-		Present:   true,
-		HostRoute: hasFlag(flags, "HOST"),
-		Gateway:   gateway,
-		Interface: iface,
-		Flags:     flags,
-		Detail:    res.Output,
+		Present:      true,
+		HostRoute:    hasFlag(flags, "HOST"),
+		NetworkRoute: networkRoute,
+		Gateway:      gateway,
+		Interface:    iface,
+		Flags:        flags,
+		Detail:       res.Output,
 	}, nil
 }
 
-func (o *Ops) inspectLinux(ctx context.Context, host string) (Inspection, error) {
-	res, err := o.runner.Run(ctx, o.ipBin, "route", "get", host)
+func (o *Ops) inspectLinux(ctx context.Context, target string) (Inspection, error) {
+	query, isNetwork := networkQuery(target)
+	res, err := o.runner.Run(ctx, o.ipBin, "route", "get", query)
 	if err != nil {
 		if isNotFound(res.Output) {
 			return Inspection{Present: false, Detail: res.Output}, nil
@@ -94,26 +106,36 @@ func (o *Ops) inspectLinux(ctx context.Context, host string) (Inspection, error)
 	}
 	gateway, iface, ok := ParseLinuxGet(res.Output)
 	if !ok {
-		return Inspection{}, fmt.Errorf("无法解析 ip route get %s 的输出", host)
+		return Inspection{}, fmt.Errorf("无法解析 ip route get %s 的输出", target)
 	}
+
 	hostRoute := false
-	if exact, err := o.runner.Run(ctx, o.ipBin, "route", "show", host+"/32"); err == nil {
-		hostRoute = hasExactHostRoute(exact.Output, host)
-	}
+	networkRoute := false
 	flags := []string{}
+	if isNetwork {
+		if exact, err := o.runner.Run(ctx, o.ipBin, "route", "show", target); err == nil {
+			networkRoute = hasExactNetwork(exact.Output, target)
+		}
+	} else if exact, err := o.runner.Run(ctx, o.ipBin, "route", "show", target+"/32"); err == nil {
+		hostRoute = hasExactHostRoute(exact.Output, target)
+	}
 	if hostRoute {
 		flags = append(flags, "HOST")
+	}
+	if networkRoute {
+		flags = append(flags, "NET")
 	}
 	if gateway != "" {
 		flags = append(flags, "GATEWAY")
 	}
 	return Inspection{
-		Present:   true,
-		HostRoute: hostRoute,
-		Gateway:   gateway,
-		Interface: iface,
-		Flags:     flags,
-		Detail:    res.Output,
+		Present:      true,
+		HostRoute:    hostRoute,
+		NetworkRoute: networkRoute,
+		Gateway:      gateway,
+		Interface:    iface,
+		Flags:        flags,
+		Detail:       res.Output,
 	}, nil
 }
 
@@ -149,25 +171,40 @@ func parseIPConfigRouter(out string) (string, bool) {
 	return "", false
 }
 
-// AddHost 添加主机路由。接口由内核按路由表选择。
-func (o *Ops) AddHost(ctx context.Context, host, gateway string) error {
-	var err error
+// AddHost 添加路由；target 是主机地址或 CIDR 网段，接口由内核按路由表选择。
+func (o *Ops) AddHost(ctx context.Context, target, gateway string) error {
+	isNetwork := isNetworkTarget(target)
 	if o.platform == "linux" {
-		_, err = o.runner.Run(ctx, o.ipBin, "route", "replace", host+"/32", "via", gateway)
-	} else {
-		_, err = o.runner.Run(ctx, o.routeBin, "add", "-host", host, gateway)
+		route := target
+		if !isNetwork {
+			route = target + "/32"
+		}
+		_, err := o.runner.Run(ctx, o.ipBin, "route", "replace", route, "via", gateway)
+		return err
 	}
+	if isNetwork {
+		_, err := o.runner.Run(ctx, o.routeBin, "add", "-net", target, gateway)
+		return err
+	}
+	_, err := o.runner.Run(ctx, o.routeBin, "add", "-host", target, gateway)
 	return err
 }
 
-// DeleteHost 删除该目标的全部主机路由；重复路由会循环删除到 not in table。
-func (o *Ops) DeleteHost(ctx context.Context, host string) error {
+// DeleteHost 删除该目标的所有路由；重复路由会循环删除到 not in table。
+func (o *Ops) DeleteHost(ctx context.Context, target string) error {
+	isNetwork := isNetworkTarget(target)
 	for attempt := 0; attempt < 4; attempt++ {
 		var err error
 		if o.platform == "linux" {
-			_, err = o.runner.Run(ctx, o.ipBin, "route", "del", host+"/32")
+			route := target
+			if !isNetwork {
+				route = target + "/32"
+			}
+			_, err = o.runner.Run(ctx, o.ipBin, "route", "del", route)
+		} else if isNetwork {
+			_, err = o.runner.Run(ctx, o.routeBin, "delete", "-net", target)
 		} else {
-			_, err = o.runner.Run(ctx, o.routeBin, "delete", "-host", host)
+			_, err = o.runner.Run(ctx, o.routeBin, "delete", "-host", target)
 		}
 		if err == nil {
 			continue
@@ -189,7 +226,63 @@ func (o *Ops) Table(ctx context.Context) (raw, command string, err error) {
 	return res.Output, res.Command, err
 }
 
-func ParseDarwinGet(out string) (gateway, iface string, flags []string, ok bool) {
+func isNetworkTarget(target string) bool {
+	return strings.Contains(target, "/")
+}
+
+func networkQuery(target string) (string, bool) {
+	if !isNetworkTarget(target) {
+		return target, false
+	}
+	_, ipnet, err := net.ParseCIDR(target)
+	if err != nil {
+		return target, true
+	}
+	return ipnet.IP.String(), true
+}
+
+func matchesNetwork(destination, mask, target string) bool {
+	if destination == "" || destination == "default" {
+		return false
+	}
+	_, ipnet, err := net.ParseCIDR(target)
+	if err != nil {
+		return false
+	}
+	destIP := parseDestinationIP(destination)
+	if destIP == nil || !bytes.Equal(destIP, ipnet.IP.To4()) {
+		return false
+	}
+	maskIP := net.ParseIP(mask)
+	if maskIP == nil {
+		return true
+	}
+	return bytes.Equal(maskIP.To4(), net.IP(ipnet.Mask).To4())
+}
+
+func parseDestinationIP(destination string) net.IP {
+	if host, _, found := strings.Cut(destination, "/"); found {
+		destination = host
+	}
+	parts := strings.Split(destination, ".")
+	for len(parts) < 4 {
+		parts = append(parts, "0")
+	}
+	return net.ParseIP(strings.Join(parts, ".")).To4()
+}
+
+func hasExactNetwork(out, target string) bool {
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) > 0 && fields[0] == target {
+			return true
+		}
+	}
+	return false
+}
+
+func parseDarwinRoute(out string) (destination, mask, gateway, iface string, flags []string, ok bool) {
 	scanner := bufio.NewScanner(strings.NewReader(out))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -201,6 +294,10 @@ func ParseDarwinGet(out string) (gateway, iface string, flags []string, ok bool)
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "destination":
+			destination = strings.TrimSpace(value)
+		case "mask":
+			mask = strings.TrimSpace(value)
 		case "gateway":
 			gateway = strings.TrimSpace(value)
 		case "interface":
@@ -209,7 +306,12 @@ func ParseDarwinGet(out string) (gateway, iface string, flags []string, ok bool)
 			flags = parseFlags(value)
 		}
 	}
-	return gateway, iface, flags, len(flags) > 0
+	return destination, mask, gateway, iface, flags, len(flags) > 0
+}
+
+func ParseDarwinGet(out string) (gateway, iface string, flags []string, ok bool) {
+	_, _, gateway, iface, flags, ok = parseDarwinRoute(out)
+	return gateway, iface, flags, ok
 }
 
 func ParseLinuxGet(out string) (gateway, iface string, ok bool) {

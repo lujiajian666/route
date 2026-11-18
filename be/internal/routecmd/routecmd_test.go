@@ -122,3 +122,41 @@ subnet_mask (ip): 255.255.255.0
 		t.Fatal("expected no router")
 	}
 }
+
+func TestParseDarwinNetworkRoute(t *testing.T) {
+	out := `   route to: 5.5.2.0
+destination: 5.5.2.0
+       mask: 255.255.255.0
+    gateway: 192.168.100.254
+  interface: en7
+      flags: <UP,GATEWAY,DONE,STATIC>
+`
+	destination, mask, gateway, iface, flags, ok := parseDarwinRoute(out)
+	if !ok || destination != "5.5.2.0" || mask != "255.255.255.0" || gateway != "192.168.100.254" || iface != "en7" {
+		t.Fatalf("unexpected parse: %q %q %q %q %v %v", destination, mask, gateway, iface, flags, ok)
+	}
+	if !matchesNetwork(destination, mask, "5.5.2.0/24") {
+		t.Fatal("expected network match")
+	}
+	if matchesNetwork(destination, mask, "5.5.3.0/24") {
+		t.Fatal("unexpected network match")
+	}
+}
+
+func TestNetworkQuery(t *testing.T) {
+	if query, network := networkQuery("5.5.2.11/24"); !network || query != "5.5.2.0" {
+		t.Fatalf("unexpected query: %q %v", query, network)
+	}
+	if query, network := networkQuery("5.5.2.11"); network || query != "5.5.2.11" {
+		t.Fatalf("unexpected host query: %q %v", query, network)
+	}
+}
+
+func TestHasExactNetwork(t *testing.T) {
+	if !hasExactNetwork("5.5.2.0/24 via 192.168.100.254 dev en7\n", "5.5.2.0/24") {
+		t.Fatal("expected exact network route")
+	}
+	if hasExactNetwork("5.5.2.0/24 via 192.168.100.254 dev en7\n", "5.5.3.0/24") {
+		t.Fatal("unexpected network match")
+	}
+}

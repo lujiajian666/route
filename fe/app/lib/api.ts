@@ -111,8 +111,8 @@ export function addRoute(host: string, gateway: string): Promise<AddRouteRespons
   });
 }
 
-export function deleteRoute(host: string): Promise<{ removed: boolean }> {
-  return request<{ removed: boolean }>(`/routes/${encodeURIComponent(host)}`, {
+export function deleteRoute(target: string): Promise<{ removed: boolean }> {
+  return request<{ removed: boolean }>(`/routes?target=${encodeURIComponent(target)}`, {
     method: "DELETE",
   });
 }

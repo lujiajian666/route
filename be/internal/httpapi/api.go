@@ -36,7 +36,7 @@ func New(h *healer.Healer) *gin.Engine {
 		api.POST("/routes", func(c *gin.Context) {
 			addRoute(c, h)
 		})
-		api.DELETE("/routes/:host", func(c *gin.Context) {
+		api.DELETE("/routes", func(c *gin.Context) {
 			deleteRoute(c, h)
 		})
 		api.GET("/route-table", func(c *gin.Context) {
@@ -55,13 +55,13 @@ func addRoute(c *gin.Context, h *healer.Healer) {
 		fail(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	host, gateway, err := validate.HostGateway(req.Host, req.Gateway)
+	target, gateway, _, err := validate.TargetGateway(req.Host, req.Gateway)
 	if err != nil {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	view, created, err := h.Add(c.Request.Context(), host, gateway)
+	view, created, err := h.Add(c.Request.Context(), target, gateway)
 	if err != nil {
 		status := http.StatusBadGateway
 		if view.Host == "" {
@@ -74,14 +74,14 @@ func addRoute(c *gin.Context, h *healer.Healer) {
 }
 
 func deleteRoute(c *gin.Context, h *healer.Healer) {
-	host, err := validate.IPv4(c.Param("host"))
+	target, _, err := validate.Target(c.Query("target"))
 	if err != nil {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.Delete(c.Request.Context(), host); err != nil {
+	if err := h.Delete(c.Request.Context(), target); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			fail(c, http.StatusNotFound, host+" 不在托管列表中")
+			fail(c, http.StatusNotFound, target+" 不在托管列表中")
 			return
 		}
 		fail(c, http.StatusInternalServerError, err.Error())
